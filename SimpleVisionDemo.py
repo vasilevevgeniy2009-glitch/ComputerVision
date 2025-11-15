@@ -6,7 +6,7 @@ from collections import defaultdict
 import time
 from ultralytics import solutions
 
-
+ccc
 class MultiTaskVisionSystem:
 
     def __init__(self):
