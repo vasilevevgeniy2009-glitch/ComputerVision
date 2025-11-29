@@ -1,10 +1,12 @@
+import itertools
+import time
+from collections import defaultdict
+
 import cv2
+import numpy as np
 import torch
 from ultralytics import YOLO
-import numpy as np
-from collections import defaultdict
-import time
-import itertools
+
 
 class MultiTaskVisionSystem:
     def __init__(self):
