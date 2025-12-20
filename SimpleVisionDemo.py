@@ -156,12 +156,14 @@ class MultiTaskVisionSystem:
             verbose=False,
             imgsz=320
         )
-
-
+        # 1. Отрисовка стандартных боксов
         processed_frame = self.draw_detection_results(frame, results)
 
-
+        # 2. Проверка дистанции между людьми (центры)
         self.trainer.get_people_distance(processed_frame, results)
+
+        # 3. Контроль выхода за территорию поля
+        self.trainer.check_boundary_violation(processed_frame, results)
 
         return processed_frame
 
@@ -317,9 +319,92 @@ def main():
 class ElectronicTrainer:
 
     def __init__(self):
-        self.min_dist_people = 100  # Минимальная дистанция (в пикселях)
+        self.min_dist_people = 100
         self.min_dist_leg = 10
+        self.field_rect = None  # Изначально зоны нет
 
+    def detect_red_zone_area(self, frame):
+        """
+        Ищет самую большую красную зону на кадре.
+        Возвращает координаты (x, y, w, h) или None, если зона не найдена.
+        """
+        # Переводим в формат HSV для лучшего определения цвета
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # Диапазон красного цвета №1 (от 0 до 10)
+        lower_red1 = np.array([0, 120, 70])
+        upper_red1 = np.array([10, 255, 255])
+
+        # Диапазон красного цвета №2 (от 170 до 180) - красный в HSV "заворачивается"
+        lower_red2 = np.array([170, 120, 70])
+        upper_red2 = np.array([180, 255, 255])
+
+        # Создаем маски и объединяем их
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        mask = mask1 + mask2
+
+        # Убираем шумы (мелкие точки)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+
+        # Ищем контуры
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            # Берем самый большой красный объект
+            largest_contour = max(contours, key=cv2.contourArea)
+
+            # Если объект слишком маленький (шум), игнорируем его
+            if cv2.contourArea(largest_contour) > 1000:
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                return (x, y, x + w, y + h)  # Возвращаем x1, y1, x2, y2
+
+        return None
+
+    def check_boundary_violation(self, frame, results):
+        """
+        1. Автоматически находит красную зону.
+        2. Проверяет выход за её пределы.
+        """
+        # Сначала ищем зону на текущем кадре
+        detected_zone = self.detect_red_zone_area(frame)
+
+        # Если красная зона НЕ найдена - выходим, ничего не рисуем
+        if detected_zone is None:
+            return
+
+        # Если зона найдена, распаковываем координаты
+        fx1, fy1, fx2, fy2 = detected_zone
+
+        # Рисуем найденную зону (зеленая рамка поверх красной разметки для подтверждения)
+        cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), (0, 255, 0), 2)
+        cv2.putText(frame, "DETECTED ZONE", (fx1, fy1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if not results:
+            return
+
+        for result in results:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    if int(box.cls[0]) == 0:  # person
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                        # Проверяем НОГИ (низ рамки)
+                        foot_x = (x1 + x2) // 2
+                        foot_y = y2
+
+                        # Логика: точка ног ВНУТРИ найденной зоны?
+                        is_inside = (fx1 <= foot_x <= fx2 and fy1 <= foot_y <= fy2)
+
+                        if not is_inside:
+                            # ЧЕЛОВЕК ВЫШЕЛ ЗА ПРЕДЕЛЫ
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
+                            cv2.circle(frame, (foot_x, foot_y), 8, (0, 0, 255), -1)
+                            cv2.putText(frame, "OUT OF ZONE!", (x1, y1 - 25),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
     def get_leg_distance(self, frame, results):
         """
         Рассчитывает и отображает расстояние между лодыжками (из режима Pose).
