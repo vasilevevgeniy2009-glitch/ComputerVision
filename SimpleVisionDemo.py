@@ -1,20 +1,19 @@
+import itertools
+import time
+from collections import defaultdict
+
 import cv2
+import numpy as np
 import torch
 from ultralytics import YOLO
-import numpy as np
-from collections import defaultdict
-import time
-from ultralytics import solutions
 
 
 class MultiTaskVisionSystem:
-
     def __init__(self):
         # Initialize SMALL models for different tasks
         self.models = {
             'detection': YOLO('yolo11s.pt'),  # Object detection
             'segmentation': YOLO('yolo11s-seg.pt'),  # Segmentation
-
             'pose': YOLO('yolo11s-pose.pt'),  # Pose estimation
             'tracking': YOLO('yolo11s.pt'),  # Tracking
         }
@@ -30,6 +29,8 @@ class MultiTaskVisionSystem:
         self.track_history = defaultdict(lambda: [])
         self.fps = 0
         self.prev_time = 0
+
+        self.trainer = ElectronicTrainer()
 
     def setup_camera(self, camera_id=0):
         """Setup camera"""
@@ -137,16 +138,6 @@ class MultiTaskVisionSystem:
 
         return frame
 
-    def draw_obb_results(self, frame, results):
-        """Visualize oriented bounding box results"""
-        for result in results:
-            if hasattr(result, 'obb') and result.obb is not None:
-                # Use built-in visualization for OBB
-                annotated_frame = result.plot()
-                return annotated_frame
-
-        return frame
-
     def get_color(self, track_id):
         """Generate color based on track ID"""
         colors = [
@@ -165,7 +156,16 @@ class MultiTaskVisionSystem:
             verbose=False,
             imgsz=320
         )
-        return self.draw_detection_results(frame, results)
+        # 1. Отрисовка стандартных боксов
+        processed_frame = self.draw_detection_results(frame, results)
+
+        # 2. Проверка дистанции между людьми (центры)
+        self.trainer.get_people_distance(processed_frame, results)
+
+        # 3. Контроль выхода за территорию поля
+        self.trainer.check_boundary_violation(processed_frame, results)
+
+        return processed_frame
 
     def run_segmentation(self, frame):
         """Run segmentation"""
@@ -185,7 +185,12 @@ class MultiTaskVisionSystem:
             verbose=False,
             imgsz=320
         )
-        return self.draw_pose_results(frame, results)
+        # Сначала рисуем основные результаты (скелет)
+        processed_frame = self.draw_pose_results(frame, results)
+
+        self.trainer.get_leg_distance(processed_frame, results)
+
+        return processed_frame
 
     def run_tracking(self, frame):
         """Run object tracking"""
@@ -200,7 +205,6 @@ class MultiTaskVisionSystem:
         )
         return self.draw_tracking_results(frame, results)
 
-
     def run(self):
         """Main processing loop"""
         print("Starting Computer Vision System with SMALL models...")
@@ -209,7 +213,6 @@ class MultiTaskVisionSystem:
         print("2 - Segmentation")
         print("4 - Object Tracking")
         print("5 - Pose Estimation")
-        print("6 - Oriented Bounding Boxes (OBB)")
         print("q - Quit")
 
         current_mode = 'detection'
@@ -219,7 +222,13 @@ class MultiTaskVisionSystem:
             ret, frame = self.cap.read()
             if not ret:
                 print("Failed to get frame")
-                break
+
+                if self.cap.get(cv2.CAP_PROP_POS_FRAMES) > 0:
+                    print("End of video file. Restarting.")
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                else:
+                    break
 
             # Calculate FPS
             fps = self.calculate_fps()
@@ -234,9 +243,6 @@ class MultiTaskVisionSystem:
                     processed_frame = self.run_segmentation(frame.copy())
                     mode_text = "Mode: Segmentation"
 
-                elif current_mode == 'classification':
-                    processed_frame = self.run_classification(frame.copy())
-                    mode_text = "Mode: Classification"
 
                 elif current_mode == 'tracking':
                     processed_frame = self.run_tracking(frame.copy())
@@ -246,9 +252,10 @@ class MultiTaskVisionSystem:
                     processed_frame = self.run_pose_estimation(frame.copy())
                     mode_text = "Mode: Pose Estimation"
 
-                elif current_mode == 'obb':
-                    processed_frame = self.run_obb(frame.copy())
-                    mode_text = "Mode: Oriented BBoxes (OBB)"
+                else:
+                    # На случай, если current_mode будет иметь неожиданное значение
+                    processed_frame = frame.copy()
+                    mode_text = "Mode: Unknown"
 
                 # Display current mode and FPS
                 cv2.putText(processed_frame, mode_text, (10, 25),
@@ -274,15 +281,13 @@ class MultiTaskVisionSystem:
             elif key == ord('2'):
                 current_mode = 'segmentation'
                 print("Switched to: Segmentation")
+
             elif key == ord('4'):
                 current_mode = 'tracking'
                 print("Switched to: Object Tracking")
             elif key == ord('5'):
                 current_mode = 'pose'
                 print("Switched to: Pose Estimation")
-            elif key == ord('6'):
-                current_mode = 'obb'
-                print("Switched to: Oriented Bounding Boxes")
 
         self.cleanup()
 
@@ -293,60 +298,186 @@ class MultiTaskVisionSystem:
         print("System stopped")
 
 
-distancecalculator = solutions.DistanceCalculation(
-    model="yolo11n.pt",  # path to the YOLO11 model file.
-    show=True,
-
-class ElectronicTrainer:
-
-    def __init__(self):
-        self.min_dist_people= 5
-        self.min_dist_leg = 10
-
-    def get_leg_distance(self, frame):
-        results = self.models['pose']
-        if len(results[0].keypoints) == 0:
-            return None
-        keypoints = results[0].keypoints.xy[0].cpu().numpy()
-        left_ankle = keypoints[15]
-        right_ankle = keypoints[16]
-        distance = np.linalg.norm(left_ankle - right_ankle)
-        x1, y1 = map(int, left_ankle)
-        x2, y2 = map(int, right_ankle)
-        cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"Distance: {int(distance)} px", (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        return distance
-
-    def get_people_distance(self):
-        results = distancecalculator(frame)
-
-        distances = results.distance_info
-
-        return distances, results
-
-
 def main():
     # Check GPU availability
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     print(f"Using SMALL models for better performance")
 
-
     try:
         # Create and run system
         vision_system = MultiTaskVisionSystem()
-        Trainer = ElectronicTrainer()
-        pose , _ = vision_system.run_pose_estimation()
-        Trainer.get_leg_distance(pose)
         vision_system.setup_camera(0)
         vision_system.run()
-
 
     except Exception as e:
         print(f"Error: {e}")
     finally:
         cv2.destroyAllWindows()
+
+
+class ElectronicTrainer:
+
+    def __init__(self):
+        self.min_dist_people = 100
+        self.min_dist_leg = 10
+        self.field_rect = None  # Изначально зоны нет
+
+    def detect_red_zone_area(self, frame):
+        """
+        Ищет самую большую красную зону на кадре.
+        Возвращает координаты (x, y, w, h) или None, если зона не найдена.
+        """
+        # Переводим в формат HSV для лучшего определения цвета
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # Диапазон красного цвета №1 (от 0 до 10)
+        lower_red1 = np.array([0, 120, 70])
+        upper_red1 = np.array([10, 255, 255])
+
+        # Диапазон красного цвета №2 (от 170 до 180) - красный в HSV "заворачивается"
+        lower_red2 = np.array([170, 120, 70])
+        upper_red2 = np.array([180, 255, 255])
+
+        # Создаем маски и объединяем их
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        mask = mask1 + mask2
+
+        # Убираем шумы (мелкие точки)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+
+        # Ищем контуры
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            # Берем самый большой красный объект
+            largest_contour = max(contours, key=cv2.contourArea)
+
+            # Если объект слишком маленький (шум), игнорируем его
+            if cv2.contourArea(largest_contour) > 1000:
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                return (x, y, x + w, y + h)  # Возвращаем x1, y1, x2, y2
+
+        return None
+
+    def check_boundary_violation(self, frame, results):
+        """
+        1. Автоматически находит красную зону.
+        2. Проверяет выход за её пределы.
+        """
+        # Сначала ищем зону на текущем кадре
+        detected_zone = self.detect_red_zone_area(frame)
+
+        # Если красная зона НЕ найдена - выходим, ничего не рисуем
+        if detected_zone is None:
+            return
+
+        # Если зона найдена, распаковываем координаты
+        fx1, fy1, fx2, fy2 = detected_zone
+
+        # Рисуем найденную зону (зеленая рамка поверх красной разметки для подтверждения)
+        cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), (0, 255, 0), 2)
+        cv2.putText(frame, "DETECTED ZONE", (fx1, fy1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if not results:
+            return
+
+        for result in results:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    if int(box.cls[0]) == 0:  # person
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                        # Проверяем НОГИ (низ рамки)
+                        foot_x = (x1 + x2) // 2
+                        foot_y = y2
+
+                        # Логика: точка ног ВНУТРИ найденной зоны?
+                        is_inside = (fx1 <= foot_x <= fx2 and fy1 <= foot_y <= fy2)
+
+                        if not is_inside:
+                            # ЧЕЛОВЕК ВЫШЕЛ ЗА ПРЕДЕЛЫ
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
+                            cv2.circle(frame, (foot_x, foot_y), 8, (0, 0, 255), -1)
+                            cv2.putText(frame, "OUT OF ZONE!", (x1, y1 - 25),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+    def get_leg_distance(self, frame, results):
+        """
+        Рассчитывает и отображает расстояние между лодыжками (из режима Pose).
+        """
+        try:
+            if not results or results[0].keypoints is None or results[0].keypoints.xy.shape[0] == 0:
+                return
+
+            keypoints = results[0].keypoints.xy[0].cpu().numpy()
+            if len(keypoints) < 17:
+                return
+
+            left_ankle = keypoints[15]
+            right_ankle = keypoints[16]
+
+            if np.all(left_ankle == 0) or np.all(right_ankle == 0):
+                return
+
+            distance = np.linalg.norm(left_ankle - right_ankle)
+            x1, y1 = map(int, left_ankle)
+            x2, y2 = map(int, right_ankle)
+
+            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"Distance: {int(distance)} px", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        except Exception as e:
+            print(f"Error in get_leg_distance: {e}")
+
+    def get_people_distance(self, frame, results):
+        """
+        Рассчитывает и отображает расстояние между людьми
+        """
+        people_centers = []
+        person_class_id = 0
+
+        # Находим всех людей и их центральные точки
+        for result in results:
+            if result.boxes is not None:
+                for box in result.boxes:
+                    if int(box.cls[0]) == person_class_id:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
+                        full_center = (center_x, center_y)
+
+                        people_centers.append(full_center)
+
+        # Если есть 2 или более человека, рассчитываем расстояния
+        if len(people_centers) >= 2:
+
+            for p1_center, p2_center in itertools.combinations(people_centers, 2):
+
+                # Расчет Евклидова расстояния
+                distance = np.linalg.norm(np.array(p1_center) - np.array(p2_center))
+
+                # Визуализация
+                color = (0, 255, 0)
+                if distance < self.min_dist_people:
+                    color = (0, 0, 255)
+
+                cv2.line(frame, p1_center, p2_center, color, 2)
+
+                # Надпись с расстоянием
+                mid_point = ((p1_center[0] + p2_center[0]) // 2,
+                             (p1_center[1] + p2_center[1]) // 2)
+
+                cv2.putText(frame, f"{int(distance)} px", mid_point,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # Функция изменяет 'frame' на месте, возвращать не нужно
+
+
 
 
 if __name__ == "__main__":
